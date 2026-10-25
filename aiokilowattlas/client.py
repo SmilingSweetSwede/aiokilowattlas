@@ -177,15 +177,25 @@ class KilowattlasClient:
         samples: list[dict[str, Any]] | None = None,
         measurements: list[dict[str, Any]] | None = None,
         donor: dict[str, Any] | None = None,
+        channels: list[dict[str, Any]] | None = None,
     ) -> IngestResult:
         """Push readings. Idempotent server-side.
 
         `samples` are raw readings at whatever resolution the source produces,
-        each {ts, power_kw, channel_key?}; the server computes slot means.
+        each {ts, power_kw, channel_key?}; the server computes slot means. For a
+        `battery_soc` channel `power_kw` carries percent (0-100), not kW.
         `measurements` are pre-aggregated slot means (legacy shape).
-        `donor` is optional self-reported telemetry.
+        `donor` is optional self-reported telemetry
+        (config_version, measured_sample_interval_seconds, sample_capability,
+        battery_power_kw).
+        `channels` declares the measurement kind of channels that may not exist
+        yet, each {channel_key, measurement_kind}; the server applies a
+        declaration only when it creates the channel and never relabels an
+        existing one. Omitted in the 0.1.0 wire format, which stays valid.
         """
         body: dict[str, Any] = {}
+        if channels:
+            body["channels"] = channels
         if samples:
             body["samples"] = samples
         if measurements:
@@ -203,7 +213,11 @@ class KilowattlasClient:
             )
         data = self._object(text)
         rejected = [
-            RejectedSample(ts=str(r.get("ts", "")), reason=str(r.get("reason", "?")))
+            RejectedSample(
+                ts=str(r.get("ts", "")),
+                reason=str(r.get("reason", "?")),
+                channel_key=str(r.get("channel_key") or ""),
+            )
             for r in (data.get("rejected") or [])
             if isinstance(r, dict)
         ]

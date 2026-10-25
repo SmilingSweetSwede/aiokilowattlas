@@ -5,6 +5,24 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+# Measurement kinds a channel may declare at creation. Only gross_production is
+# ever summed as production by the server; the rest are stored, shown to the
+# owner and drawn on the map, but kept out of every generation figure.
+KIND_GROSS_PRODUCTION = "gross_production"
+KIND_NET_EXPORT = "net_export"  # grid connection point, positive = export
+KIND_CONSUMPTION = "consumption"
+KIND_BATTERY_POWER = "battery_power"  # positive = discharge (out of the battery)
+KIND_BATTERY_SOC = "battery_soc"  # percent 0-100, carried in power_kw
+MEASUREMENT_KINDS = frozenset(
+    {
+        KIND_GROSS_PRODUCTION,
+        KIND_NET_EXPORT,
+        KIND_CONSUMPTION,
+        KIND_BATTERY_POWER,
+        KIND_BATTERY_SOC,
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class DeviceCode:
@@ -43,10 +61,15 @@ class SiteInfo:
 
 @dataclass(frozen=True, slots=True)
 class RejectedSample:
-    """One reading the server refused, with its machine-readable reason."""
+    """One reading the server refused, with its machine-readable reason.
+
+    `channel_key` is empty for the default channel and on servers that predate
+    multi-channel rejections.
+    """
 
     ts: str
     reason: str
+    channel_key: str = ""
 
 
 @dataclass(frozen=True, slots=True)

@@ -10,9 +10,21 @@ from .exceptions import (
     KilowattlasError,
     KilowattlasResponseError,
 )
-from .models import DeviceCode, IngestResult, RejectedSample, SiteInfo, TokenGrant
+from .models import (
+    KIND_BATTERY_POWER,
+    KIND_BATTERY_SOC,
+    KIND_CONSUMPTION,
+    KIND_GROSS_PRODUCTION,
+    KIND_NET_EXPORT,
+    MEASUREMENT_KINDS,
+    DeviceCode,
+    IngestResult,
+    RejectedSample,
+    SiteInfo,
+    TokenGrant,
+)
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "CONFIG_CLAMPS",
@@ -22,6 +34,12 @@ __all__ = [
     "AuthorizationPending",
     "DeviceCode",
     "IngestResult",
+    "KIND_BATTERY_POWER",
+    "KIND_BATTERY_SOC",
+    "KIND_CONSUMPTION",
+    "KIND_GROSS_PRODUCTION",
+    "KIND_NET_EXPORT",
+    "MEASUREMENT_KINDS",
     "KilowattlasAuthError",
     "KilowattlasClient",
     "KilowattlasConnectionError",

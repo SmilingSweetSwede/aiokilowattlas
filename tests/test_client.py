@@ -308,3 +308,108 @@ async def test_revoke_failure(aresponses, client):
     aresponses.add(HOST, EP_REVOKE, "POST", Response(status=500, text="boom"))
     with pytest.raises(KilowattlasResponseError, match="500"):
         await client.revoke("tok")
+
+
+async def test_ingest_multi_channel(aresponses, client):
+    """0.2.0 wire format: channel declarations, per-channel samples, battery donor."""
+
+    async def handler(request):
+        body = await request.json()
+        assert body == {
+            "channels": [
+                {"channel_key": "battery", "measurement_kind": "battery_power"},
+                {"channel_key": "battery_soc", "measurement_kind": "battery_soc"},
+            ],
+            "samples": [
+                {"ts": "2026-10-25T10:00:00.000000Z", "power_kw": 3.21},
+                {
+                    "ts": "2026-10-25T10:00:00.000000Z",
+                    "power_kw": -1.5,
+                    "channel_key": "battery",
+                },
+                {
+                    "ts": "2026-10-25T10:00:00.000000Z",
+                    "power_kw": 101.0,
+                    "channel_key": "battery_soc",
+                },
+            ],
+            "donor": {"config_version": 3, "battery_power_kw": 5.0},
+        }
+        return _json(
+            {
+                "accepted": 2,
+                "rejected": [
+                    {
+                        "ts": "2026-10-25T10:00:00Z",
+                        "channel_key": "battery_soc",
+                        "reason": "soc_out_of_range",
+                    },
+                    {"ts": "2026-10-25T10:00:00Z", "reason": "negative_power"},
+                    {"ts": "y", "channel_key": None, "reason": "x"},
+                ],
+            }
+        )
+
+    aresponses.add(HOST, EP_INGEST, "POST", handler)
+    result = await client.ingest(
+        "tok",
+        samples=[
+            {"ts": "2026-10-25T10:00:00.000000Z", "power_kw": 3.21},
+            {
+                "ts": "2026-10-25T10:00:00.000000Z",
+                "power_kw": -1.5,
+                "channel_key": "battery",
+            },
+            {
+                "ts": "2026-10-25T10:00:00.000000Z",
+                "power_kw": 101.0,
+                "channel_key": "battery_soc",
+            },
+        ],
+        donor={"config_version": 3, "battery_power_kw": 5.0},
+        channels=[
+            {"channel_key": "battery", "measurement_kind": "battery_power"},
+            {"channel_key": "battery_soc", "measurement_kind": "battery_soc"},
+        ],
+    )
+    assert result.accepted == 2
+    assert [(r.channel_key, r.reason) for r in result.rejected] == [
+        ("battery_soc", "soc_out_of_range"),
+        ("", "negative_power"),
+        ("", "x"),
+    ]
+
+
+async def test_ingest_empty_channels_is_legacy_format(aresponses, client):
+    """An empty declaration list must not appear on the wire (0.1.0 shape)."""
+
+    async def handler(request):
+        assert await request.json() == {"samples": [{"ts": "t", "power_kw": 1}]}
+        return _json({"accepted": 1})
+
+    aresponses.add(HOST, EP_INGEST, "POST", handler)
+    result = await client.ingest(
+        "tok", samples=[{"ts": "t", "power_kw": 1}], channels=[]
+    )
+    assert result.accepted == 1
+    assert result.rejected == []
+
+
+def test_measurement_kind_constants():
+    from aiokilowattlas import (
+        KIND_BATTERY_POWER,
+        KIND_BATTERY_SOC,
+        KIND_CONSUMPTION,
+        KIND_GROSS_PRODUCTION,
+        KIND_NET_EXPORT,
+        MEASUREMENT_KINDS,
+    )
+
+    assert MEASUREMENT_KINDS == {
+        KIND_GROSS_PRODUCTION,
+        KIND_NET_EXPORT,
+        KIND_CONSUMPTION,
+        KIND_BATTERY_POWER,
+        KIND_BATTERY_SOC,
+    }
+    assert KIND_BATTERY_SOC == "battery_soc"
