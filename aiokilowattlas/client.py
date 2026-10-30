@@ -3,26 +3,45 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 import aiohttp
 
 from .exceptions import (
+    KilowattlasConflictError,
+    KilowattlasRejectedError,
     AuthorizationExpired,
     AuthorizationPending,
     KilowattlasAuthError,
     KilowattlasConnectionError,
     KilowattlasResponseError,
 )
-from .models import DeviceCode, IngestResult, RejectedSample, SiteInfo, TokenGrant
+from .models import (
+    DeviceCode,
+    IngestResult,
+    RejectedSample,
+    SiteDetails,
+    SiteInfo,
+    TokenGrant,
+)
 
-DEFAULT_BASE_URL = "https://api.kilowattlas.com"
+PRODUCTION_BASE_URL = "https://api.kilowattlas.com"
+
+# Developers and self-hosters point the client at another server with
+# KILOWATTLAS_API_BASE (the Kilowattlas dev stack sets http://backend:8050 for
+# its Home Assistant test container). Read once at import: Home Assistant
+# constructs the client without a base_url, so this is the only knob it has.
+DEFAULT_BASE_URL = (
+    os.environ.get("KILOWATTLAS_API_BASE", "").strip() or PRODUCTION_BASE_URL
+)
 
 EP_DEVICE_CODE = "/api/v1/contrib/device/code"
 EP_DEVICE_TOKEN = "/api/v1/contrib/device/token"
 EP_INGEST = "/api/v1/contrib/solar"
 EP_REVOKE = "/api/v1/contrib/revoke"
 EP_ME = "/api/v1/contrib/me"
+EP_DETAILS = "/api/v1/contrib/me/details"
 
 # Server text is logged by callers; keep it short and on one line so a hostile
 # or broken server cannot spam or inject into a log.
@@ -171,6 +190,58 @@ class KilowattlasClient:
             config=config if isinstance(config, dict) else None,
         )
 
+    async def get_site_details(self, token: str) -> SiteDetails:
+        """Read the owner's description of the installation."""
+        status, text = await self._request("GET", EP_DETAILS, token=token)
+        if status == 401:
+            raise KilowattlasAuthError("token rejected")
+        if status != 200:
+            raise KilowattlasResponseError(
+                f"details returned {status}: {_snippet(text)}"
+            )
+        return self._site_details(text)
+
+    async def update_site_details(
+        self, token: str, details: dict[str, Any], revision: str
+    ) -> SiteDetails:
+        """Replace the description, based on the revision last read.
+
+        Raises KilowattlasConflictError when it changed elsewhere in between,
+        and KilowattlasRejectedError when the server refuses a value.
+        """
+        status, text = await self._request(
+            "PUT",
+            EP_DETAILS,
+            json_body={"revision": revision, "details": details},
+            token=token,
+        )
+        if status == 401:
+            raise KilowattlasAuthError("token rejected")
+        if status == 409:
+            data = self._object(text)
+            current = data.get("details")
+            raise KilowattlasConflictError(
+                current if isinstance(current, dict) else None,
+                str(data["revision"]) if data.get("revision") else None,
+            )
+        if status == 400:
+            raise KilowattlasRejectedError(
+                str(self._object(text).get("error") or "invalid_request")
+            )
+        if status != 200:
+            raise KilowattlasResponseError(
+                f"details returned {status}: {_snippet(text)}"
+            )
+        return self._site_details(text)
+
+    def _site_details(self, text: str) -> SiteDetails:
+        data = self._object(text)
+        details = data.get("details")
+        revision = data.get("revision")
+        if not isinstance(details, dict) or not revision:
+            raise KilowattlasResponseError("details returned an unexpected response")
+        return SiteDetails(details=details, revision=str(revision))
+
     async def ingest(
         self,
         token: str,
@@ -187,11 +258,16 @@ class KilowattlasClient:
         `measurements` are pre-aggregated slot means (legacy shape).
         `donor` is optional self-reported telemetry
         (config_version, measured_sample_interval_seconds, sample_capability,
-        battery_power_kw).
+        battery_power_kw, and since 0.5.0 battery_capacity_kwh).
         `channels` declares the measurement kind of channels that may not exist
-        yet, each {channel_key, measurement_kind}; the server applies a
+        yet, each {channel_key, measurement_kind, name?}; the server applies a
         declaration only when it creates the channel and never relabels an
         existing one. Omitted in the 0.1.0 wire format, which stays valid.
+        Kinds: gross_production, net_export, consumption, battery_power,
+        battery_soc; since 0.3.0 the loads ev_charger_power and heat_pump_power
+        (kW, never negative, never counted as production); since 0.5.0
+        grid_power (the Home Assistant Energy dashboard's sign, positive =
+        import, stored as net_export) and device_power (one named device).
         """
         body: dict[str, Any] = {}
         if channels:

@@ -1,30 +1,44 @@
 """Async client for the Kilowattlas contributed-solar API."""
 
 from .client import DEFAULT_BASE_URL, KilowattlasClient
-from .config import CONFIG_CLAMPS, DEFAULT_CONFIG, capability_tier, resolve_config
+from .config import (
+    CONFIG_CLAMPS,
+    DEFAULT_CONFIG,
+    SERVER_DEFAULT_CHANNEL_KEY,
+    capability_tier,
+    is_channel_disabled,
+    resolve_config,
+)
 from .exceptions import (
     AuthorizationExpired,
     AuthorizationPending,
     KilowattlasAuthError,
+    KilowattlasConflictError,
     KilowattlasConnectionError,
     KilowattlasError,
+    KilowattlasRejectedError,
     KilowattlasResponseError,
 )
 from .models import (
     KIND_BATTERY_POWER,
     KIND_BATTERY_SOC,
     KIND_CONSUMPTION,
+    KIND_DEVICE_POWER,
+    KIND_EV_CHARGER_POWER,
+    KIND_GRID_POWER,
     KIND_GROSS_PRODUCTION,
+    KIND_HEAT_PUMP_POWER,
     KIND_NET_EXPORT,
     MEASUREMENT_KINDS,
     DeviceCode,
     IngestResult,
     RejectedSample,
+    SiteDetails,
     SiteInfo,
     TokenGrant,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.6.0"
 
 __all__ = [
     "CONFIG_CLAMPS",
@@ -37,17 +51,26 @@ __all__ = [
     "KIND_BATTERY_POWER",
     "KIND_BATTERY_SOC",
     "KIND_CONSUMPTION",
+    "KIND_DEVICE_POWER",
+    "KIND_EV_CHARGER_POWER",
+    "KIND_GRID_POWER",
     "KIND_GROSS_PRODUCTION",
+    "KIND_HEAT_PUMP_POWER",
     "KIND_NET_EXPORT",
     "MEASUREMENT_KINDS",
     "KilowattlasAuthError",
     "KilowattlasClient",
+    "KilowattlasConflictError",
     "KilowattlasConnectionError",
+    "KilowattlasRejectedError",
     "KilowattlasError",
     "KilowattlasResponseError",
     "RejectedSample",
+    "SERVER_DEFAULT_CHANNEL_KEY",
+    "SiteDetails",
     "SiteInfo",
     "TokenGrant",
     "capability_tier",
+    "is_channel_disabled",
     "resolve_config",
 ]

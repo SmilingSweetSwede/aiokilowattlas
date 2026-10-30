@@ -9,10 +9,13 @@ from aiokilowattlas import (
     AuthorizationPending,
     KilowattlasAuthError,
     KilowattlasClient,
+    KilowattlasConflictError,
     KilowattlasConnectionError,
+    KilowattlasRejectedError,
     KilowattlasResponseError,
 )
 from aiokilowattlas.client import (
+    EP_DETAILS,
     EP_DEVICE_CODE,
     EP_DEVICE_TOKEN,
     EP_INGEST,
@@ -396,11 +399,16 @@ async def test_ingest_empty_channels_is_legacy_format(aresponses, client):
 
 
 def test_measurement_kind_constants():
+    import aiokilowattlas
     from aiokilowattlas import (
         KIND_BATTERY_POWER,
         KIND_BATTERY_SOC,
         KIND_CONSUMPTION,
+        KIND_DEVICE_POWER,
+        KIND_EV_CHARGER_POWER,
+        KIND_GRID_POWER,
         KIND_GROSS_PRODUCTION,
+        KIND_HEAT_PUMP_POWER,
         KIND_NET_EXPORT,
         MEASUREMENT_KINDS,
     )
@@ -411,5 +419,126 @@ def test_measurement_kind_constants():
         KIND_CONSUMPTION,
         KIND_BATTERY_POWER,
         KIND_BATTERY_SOC,
+        KIND_EV_CHARGER_POWER,
+        KIND_HEAT_PUMP_POWER,
+        KIND_GRID_POWER,
+        KIND_DEVICE_POWER,
+    }
+    assert MEASUREMENT_KINDS == {
+        "gross_production",
+        "net_export",
+        "grid_power",
+        "consumption",
+        "battery_power",
+        "battery_soc",
+        "ev_charger_power",
+        "heat_pump_power",
+        "device_power",
     }
     assert KIND_BATTERY_SOC == "battery_soc"
+    assert KIND_EV_CHARGER_POWER == "ev_charger_power"
+    assert KIND_HEAT_PUMP_POWER == "heat_pump_power"
+    assert KIND_GRID_POWER == "grid_power"
+    assert KIND_DEVICE_POWER == "device_power"
+    for name in (
+        "KIND_EV_CHARGER_POWER",
+        "KIND_HEAT_PUMP_POWER",
+        "KIND_GRID_POWER",
+        "KIND_DEVICE_POWER",
+        "MEASUREMENT_KINDS",
+    ):
+        assert name in aiokilowattlas.__all__
+    assert aiokilowattlas.__version__ == "0.6.0"
+
+
+def test_default_base_url_honours_env(monkeypatch):
+    """KILOWATTLAS_API_BASE redirects the default; blank means production."""
+    import importlib
+
+    import aiokilowattlas.client as mod
+
+    monkeypatch.setenv("KILOWATTLAS_API_BASE", " http://backend:8050/ ")
+    importlib.reload(mod)
+    assert mod.DEFAULT_BASE_URL == "http://backend:8050/"
+    assert mod.KilowattlasClient(None).base_url == "http://backend:8050"  # type: ignore[arg-type]
+
+    monkeypatch.setenv("KILOWATTLAS_API_BASE", "   ")
+    importlib.reload(mod)
+    assert mod.DEFAULT_BASE_URL == mod.PRODUCTION_BASE_URL
+
+    monkeypatch.delenv("KILOWATTLAS_API_BASE")
+    importlib.reload(mod)
+    assert mod.DEFAULT_BASE_URL == "https://api.kilowattlas.com"
+
+
+async def test_get_site_details(aresponses, client):
+    aresponses.add(
+        HOST,
+        EP_DETAILS,
+        "GET",
+        _json({"details": {"install_year": 2021}, "revision": "abc"}),
+    )
+    got = await client.get_site_details("tok")
+    assert got.details == {"install_year": 2021}
+    assert got.revision == "abc"
+
+
+async def test_get_site_details_errors(aresponses, client):
+    aresponses.add(HOST, EP_DETAILS, "GET", Response(status=401))
+    with pytest.raises(KilowattlasAuthError):
+        await client.get_site_details("tok")
+    aresponses.add(HOST, EP_DETAILS, "GET", Response(status=500, text="x"))
+    with pytest.raises(KilowattlasResponseError):
+        await client.get_site_details("tok")
+    aresponses.add(HOST, EP_DETAILS, "GET", _json({"details": []}))
+    with pytest.raises(KilowattlasResponseError):
+        await client.get_site_details("tok")
+
+
+async def test_update_site_details(aresponses, client):
+    async def handler(request):
+        assert await request.json() == {
+            "revision": "abc",
+            "details": {"roof_tilt_deg": 27},
+        }
+        return _json({"details": {"roof_tilt_deg": 27}, "revision": "def"})
+
+    aresponses.add(HOST, EP_DETAILS, "PUT", handler)
+    got = await client.update_site_details("tok", {"roof_tilt_deg": 27}, "abc")
+    assert got.revision == "def"
+
+
+async def test_update_site_details_conflict_and_rejection(aresponses, client):
+    aresponses.add(
+        HOST,
+        EP_DETAILS,
+        "PUT",
+        Response(
+            status=409,
+            text=json.dumps({"details": {"install_year": 2022}, "revision": "new"}),
+        ),
+    )
+    with pytest.raises(KilowattlasConflictError) as conflict:
+        await client.update_site_details("tok", {}, "old")
+    assert conflict.value.current == {"install_year": 2022}
+    assert conflict.value.revision == "new"
+
+    aresponses.add(
+        HOST,
+        EP_DETAILS,
+        "PUT",
+        Response(status=400, text=json.dumps({"error": "value_out_of_range"})),
+    )
+    with pytest.raises(KilowattlasRejectedError) as rejected:
+        await client.update_site_details("tok", {}, "old")
+    assert rejected.value.code == "value_out_of_range"
+
+
+async def test_update_site_details_other_errors(aresponses, client):
+    aresponses.add(HOST, EP_DETAILS, "PUT", Response(status=401))
+    with pytest.raises(KilowattlasAuthError):
+        await client.update_site_details("tok", {}, "old")
+    aresponses.add(HOST, EP_DETAILS, "PUT", Response(status=500, text="x"))
+    with pytest.raises(KilowattlasResponseError):
+        await client.update_site_details("tok", {}, "old")
+
