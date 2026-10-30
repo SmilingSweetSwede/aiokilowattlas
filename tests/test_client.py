@@ -541,4 +541,3 @@ async def test_update_site_details_other_errors(aresponses, client):
     aresponses.add(HOST, EP_DETAILS, "PUT", Response(status=500, text="x"))
     with pytest.raises(KilowattlasResponseError):
         await client.update_site_details("tok", {}, "old")
-

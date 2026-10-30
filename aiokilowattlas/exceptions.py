@@ -33,6 +33,7 @@ class KilowattlasConflictError(KilowattlasError):
     """The details changed elsewhere since they were read; `current` has them."""
 
     def __init__(self, current: dict[str, Any] | None, revision: str | None) -> None:
+        """Keep what the server has now, so the caller can show it."""
         super().__init__("details changed since they were read")
         self.current = current
         self.revision = revision
@@ -42,5 +43,6 @@ class KilowattlasRejectedError(KilowattlasError):
     """The server refused a value; `code` says why (e.g. value_out_of_range)."""
 
     def __init__(self, code: str) -> None:
+        """Keep the server's reason."""
         super().__init__(code)
         self.code = code
