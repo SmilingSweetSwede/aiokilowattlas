@@ -9,6 +9,10 @@ class KilowattlasError(Exception):
     """Base class for every error this library raises."""
 
 
+class KilowattlasConfigError(KilowattlasError, ValueError):
+    """The client was set up with something it refuses, such as a non-HTTPS URL."""
+
+
 class KilowattlasConnectionError(KilowattlasError):
     """The API could not be reached (DNS, TCP, TLS, timeout)."""
 

@@ -66,6 +66,27 @@ Endpoints covered: device-code linking (RFC 8628 style), multi-channel
 raw-sample ingest, site info (`/contrib/me`) and self-revoke. Server-directed config documents are
 validated and clamped by `aiokilowattlas.config.resolve_config`.
 
+Since 0.7.0:
+
+- **Two-phase linking.** `request_device_code(..., activation=True)` asks the
+  server not to create the installation when the user approves, but when the
+  client reports that its own setup is finished. `poll_token` then returns a
+  grant with `activation_required` and no `site_id`; call
+  `await client.activate(grant.token)` as the last step of the setup to create
+  the installation and get its id and config. A setup abandoned before that
+  leaves nothing on the server. A server that predates this answers as before.
+- **HTTPS only.** The client refuses a base URL that is not `https://`
+  (`KilowattlasConfigError`, also a `ValueError`). Plain `http://` is accepted
+  only for a development stack on the local machine or network: a single-label
+  host name (`localhost`, a Docker service name), a name ending in `.local`,
+  `.lan`, `.internal`, `.localhost` or `.home.arpa`, or a loopback, private,
+  link-local or 100.64.0.0/10 address. An address with credentials, a query or
+  a fragment is refused.
+- `TokenGrant.site_id` is `int | None`: it is `None` only for a grant with
+  `activation_required`, which a caller gets only when it asked for it.
+- Redirects are not followed, and every request has a 30 second limit of its
+  own instead of the session's.
+
 Since 0.4.0 the config document carries `disabled_channels`: server channel
 keys the site owner switched off on kilowattlas.com. Send neither samples nor
 declarations for them; `is_channel_disabled(config, channel_key)` checks one,

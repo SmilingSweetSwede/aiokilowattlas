@@ -9,6 +9,7 @@ from aiokilowattlas import (
     AuthorizationPending,
     KilowattlasAuthError,
     KilowattlasClient,
+    KilowattlasConfigError,
     KilowattlasConflictError,
     KilowattlasConnectionError,
     KilowattlasRejectedError,
@@ -16,11 +17,13 @@ from aiokilowattlas import (
 )
 from aiokilowattlas.client import (
     EP_DETAILS,
+    EP_DEVICE_ACTIVATE,
     EP_DEVICE_CODE,
     EP_DEVICE_TOKEN,
     EP_INGEST,
     EP_ME,
     EP_REVOKE,
+    checked_base_url,
 )
 
 HOST = "api.kilowattlas.com"
@@ -448,7 +451,7 @@ def test_measurement_kind_constants():
         "MEASUREMENT_KINDS",
     ):
         assert name in aiokilowattlas.__all__
-    assert aiokilowattlas.__version__ == "0.6.0"
+    assert aiokilowattlas.__version__ == "0.7.0"
 
 
 def test_default_base_url_honours_env(monkeypatch):
@@ -541,3 +544,201 @@ async def test_update_site_details_other_errors(aresponses, client):
     aresponses.add(HOST, EP_DETAILS, "PUT", Response(status=500, text="x"))
     with pytest.raises(KilowattlasResponseError):
         await client.update_site_details("tok", {}, "old")
+
+
+# --- transport: HTTPS only, no redirects ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        "https://api.kilowattlas.com",
+        "https://api.kilowattlas.com/",
+        "http://localhost:8050",
+        "http://backend:8050",
+        "http://127.0.0.1:8050",
+        "http://192.168.1.20:8050",
+        "http://[::1]:8050",
+        "http://[fe80::1%25eth0]:8050",
+        "http://[::ffff:127.0.0.1]:8050",
+        "http://100.64.1.2:8050",
+        "http://host.docker.internal:8050",
+        "http://nas.local:8050",
+        "HTTP://backend:8050",
+        "https://API.kilowattlas.com:8443/base",
+    ],
+)
+def test_base_url_accepted(base):
+    assert checked_base_url(base) == base.rstrip("/")
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        "http://api.kilowattlas.com",
+        "http://8.8.8.8",
+        "http://",
+        "https://",
+        "ftp://backend",
+        "api.kilowattlas.com",
+        "",
+        # Other ways to write a public address, or to look local.
+        "http://134744072",
+        "http://0x08080808",
+        "http://127.1",
+        "http://evil\u3002com",
+        "http://evil\uff0ecom",
+        "http://localhost.evil.com",
+        "http://evil.com.local.evil.com",
+        "http://1.local",
+        "http://localhost.",
+        "http://localhost@evil.com",
+        "http://[::ffff:8.8.8.8]",
+        "http://[2002:808:808::1]",
+        "http://0.0.0.0",
+        "http://240.0.0.1",
+        # More than a scheme, a host, a port and a path.
+        "https://user:pw@api.kilowattlas.com",
+        "https://api.kilowattlas.com?x=1",
+        "https://api.kilowattlas.com#f",
+        "http://localhost:notaport",
+    ],
+)
+def test_base_url_refused(base):
+    with pytest.raises(ValueError, match="https"):
+        checked_base_url(base)
+    # Also the library's own error, so callers that catch it see this one too.
+    with pytest.raises(KilowattlasConfigError, match="https"):
+        KilowattlasClient(None, base)  # type: ignore[arg-type]
+
+
+async def test_poll_token_answer_that_is_not_json(aresponses, client):
+    """A redirect or a proxy's error page is reported by its status."""
+    aresponses.add(
+        HOST,
+        EP_DEVICE_TOKEN,
+        "POST",
+        Response(status=302, headers={"Location": "https://elsewhere.example/"}),
+    )
+    with pytest.raises(KilowattlasResponseError, match="302"):
+        await client.poll_token("dc")
+    aresponses.add(HOST, EP_DEVICE_TOKEN, "POST", Response(status=200, text="<html>"))
+    with pytest.raises(KilowattlasResponseError, match="expected JSON"):
+        await client.poll_token("dc")
+
+
+async def test_redirect_is_not_followed(aresponses, client):
+    """A redirect is an unexpected answer; the token never goes where it points."""
+    aresponses.add(
+        HOST,
+        EP_ME,
+        "GET",
+        Response(status=302, headers={"Location": "https://elsewhere.example/me"}),
+    )
+    with pytest.raises(KilowattlasResponseError, match="302"):
+        await client.get_site("kwc_t")
+    aresponses.assert_plan_strictly_followed()
+
+
+# --- two-phase linking ------------------------------------------------------------
+
+
+async def test_request_device_code_with_activation(aresponses, client):
+    async def handler(request):
+        assert await request.json() == {"activation": True}
+        return _json({"device_code": "d", "user_code": "u", "verification_uri": "v"})
+
+    aresponses.add(HOST, EP_DEVICE_CODE, "POST", handler)
+    await client.request_device_code(activation=True)
+
+
+async def test_poll_token_activation_required(aresponses, client):
+    aresponses.add(
+        HOST,
+        EP_DEVICE_TOKEN,
+        "POST",
+        _json({"token": "kwc_t", "activation_required": True}),
+    )
+    grant = await client.poll_token("dc")
+    assert grant.token == "kwc_t"
+    assert grant.activation_required is True
+    assert grant.site_id is None
+    assert grant.config is None
+
+
+async def test_poll_token_without_site_or_activation(aresponses, client):
+    aresponses.add(HOST, EP_DEVICE_TOKEN, "POST", _json({"token": "kwc_t"}))
+    with pytest.raises(KilowattlasResponseError, match="missing site_id"):
+        await client.poll_token("dc")
+
+
+async def test_poll_token_without_token(aresponses, client):
+    aresponses.add(
+        HOST, EP_DEVICE_TOKEN, "POST", _json({"site_id": 1, "activation_required": True})
+    )
+    with pytest.raises(KilowattlasResponseError, match="missing token"):
+        await client.poll_token("dc")
+
+
+async def test_activate(aresponses, client):
+    async def handler(request):
+        assert request.headers["Authorization"] == "Bearer kwc_t"
+        return _json({"site_id": 7, "config": {"config_version": 2}})
+
+    aresponses.add(HOST, EP_DEVICE_ACTIVATE, "POST", handler)
+    site = await client.activate("kwc_t")
+    assert site.site_id == 7
+    assert site.config == {"config_version": 2}
+
+
+async def test_activate_without_config(aresponses, client):
+    aresponses.add(
+        HOST, EP_DEVICE_ACTIVATE, "POST", _json({"site_id": 7, "config": "nope"})
+    )
+    assert (await client.activate("kwc_t")).config is None
+
+
+async def test_activate_unknown_token(aresponses, client):
+    aresponses.add(
+        HOST, EP_DEVICE_ACTIVATE, "POST", _json({"error": "unauthorized"}, 401)
+    )
+    with pytest.raises(KilowattlasAuthError):
+        await client.activate("kwc_t")
+
+
+async def test_activate_expired(aresponses, client):
+    aresponses.add(HOST, EP_DEVICE_ACTIVATE, "POST", _json({"error": "expired"}, 410))
+    with pytest.raises(AuthorizationExpired):
+        await client.activate("kwc_t")
+
+
+@pytest.mark.parametrize("status", [400, 403, 409])
+async def test_activate_refused(aresponses, client, status):
+    aresponses.add(
+        HOST,
+        EP_DEVICE_ACTIVATE,
+        "POST",
+        _json({"error": "plant_already_linked"}, status),
+    )
+    with pytest.raises(KilowattlasRejectedError) as exc:
+        await client.activate("kwc_t")
+    assert exc.value.code == "plant_already_linked"
+
+
+async def test_activate_refused_without_reason(aresponses, client):
+    aresponses.add(HOST, EP_DEVICE_ACTIVATE, "POST", _json({}, 409))
+    with pytest.raises(KilowattlasRejectedError) as exc:
+        await client.activate("kwc_t")
+    assert exc.value.code == "invalid_request"
+
+
+async def test_activate_server_error(aresponses, client):
+    aresponses.add(HOST, EP_DEVICE_ACTIVATE, "POST", Response(status=500, text="x"))
+    with pytest.raises(KilowattlasResponseError, match="500"):
+        await client.activate("kwc_t")
+
+
+async def test_activate_bad_shape(aresponses, client):
+    aresponses.add(HOST, EP_DEVICE_ACTIVATE, "POST", _json({"ok": True}))
+    with pytest.raises(KilowattlasResponseError, match="unexpected"):
+        await client.activate("kwc_t")

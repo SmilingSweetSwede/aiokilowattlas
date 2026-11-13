@@ -57,11 +57,16 @@ class DeviceCode:
 
 @dataclass(frozen=True, slots=True)
 class TokenGrant:
-    """Response of a successful token poll."""
+    """Response of a successful token poll.
+
+    With `activation_required` there is no installation yet and `site_id` is
+    None: `KilowattlasClient.activate` creates it and returns its id.
+    """
 
     token: str
-    site_id: int
+    site_id: int | None = None
     config: dict[str, Any] | None = None
+    activation_required: bool = False
 
 
 @dataclass(frozen=True, slots=True)

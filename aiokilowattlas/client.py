@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import re
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -12,6 +15,7 @@ from .exceptions import (
     AuthorizationExpired,
     AuthorizationPending,
     KilowattlasAuthError,
+    KilowattlasConfigError,
     KilowattlasConflictError,
     KilowattlasConnectionError,
     KilowattlasRejectedError,
@@ -38,6 +42,7 @@ DEFAULT_BASE_URL = (
 
 EP_DEVICE_CODE = "/api/v1/contrib/device/code"
 EP_DEVICE_TOKEN = "/api/v1/contrib/device/token"
+EP_DEVICE_ACTIVATE = "/api/v1/contrib/device/activate"
 EP_INGEST = "/api/v1/contrib/solar"
 EP_REVOKE = "/api/v1/contrib/revoke"
 EP_ME = "/api/v1/contrib/me"
@@ -48,8 +53,89 @@ EP_DETAILS = "/api/v1/contrib/me/details"
 _SNIPPET = 200
 
 
+# No call here is slow by design. Without a limit of its own, a request that
+# hangs sits for the session's timeout, which in Home Assistant is five minutes.
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
+
+
 def _snippet(text: str) -> str:
     return text[:_SNIPPET].replace("\n", " ")
+
+
+# Where plain HTTP is accepted: this machine and private networks, spelled out
+# so the answer does not shift with the Python version (`ipaddress.is_private`
+# also covers reserved and documentation ranges, and has changed over time).
+_LOCAL_NETWORKS = tuple(
+    ipaddress.ip_network(net)
+    for net in (
+        "127.0.0.0/8",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "169.254.0.0/16",
+        "100.64.0.0/10",  # carrier-grade NAT range, used by overlay networks
+        "::1/128",
+        "fc00::/7",
+        "fe80::/10",
+    )
+)
+# Names that only resolve on a local network or machine.
+_LOCAL_SUFFIXES = (".local", ".lan", ".internal", ".localhost", ".home.arpa")
+# A single label that starts with a letter: `localhost`, a Docker service name.
+# A label of digits or `0x...` is not a name but another way to write an
+# address (`http://134744072` is 8.8.8.8), so it must not pass as one.
+_LOCAL_NAME = re.compile(r"[a-z][a-z0-9-]*")
+
+
+def _is_local(host: str) -> bool:
+    """Whether `host` is on this machine or network and cannot be a public one."""
+    try:
+        address = ipaddress.ip_address(host.partition("%")[0])
+    except ValueError:
+        return bool(_LOCAL_NAME.fullmatch(host)) or (
+            host.endswith(_LOCAL_SUFFIXES)
+            and all(_LOCAL_NAME.fullmatch(label) for label in host.split("."))
+        )
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        address = mapped
+    return any(address in net for net in _LOCAL_NETWORKS if net.version == address.version)
+
+
+def checked_base_url(base_url: str) -> str:
+    """Return `base_url` without a trailing slash, or refuse it.
+
+    The bearer token and every reading travel to this address, so it must be
+    HTTPS. Plain HTTP is accepted only for a development stack on the local
+    machine or network (see `_is_local`), never for a host on the internet.
+    The address is a scheme, a host and optionally a port and a path: one
+    with credentials, a query or a fragment is refused as well.
+
+    Raises KilowattlasConfigError, which is both a KilowattlasError and a
+    ValueError.
+    """
+    refusal = KilowattlasConfigError(
+        f"refusing API base {base_url!r}: it must be https "
+        "(http is accepted only for a local development host)"
+    )
+    try:
+        url = urlsplit(base_url)
+        url.port  # noqa: B018 - reading it validates the port
+    except ValueError:
+        raise refusal from None
+    host = (url.hostname or "").lower()
+    if (
+        not host
+        or not host.isascii()
+        or url.username is not None
+        or url.password is not None
+        or url.query
+        or url.fragment
+    ):
+        raise refusal
+    if url.scheme == "https" or (url.scheme == "http" and _is_local(host)):
+        return base_url.rstrip("/")
+    raise refusal
 
 
 class KilowattlasClient:
@@ -58,9 +144,13 @@ class KilowattlasClient:
     def __init__(
         self, session: aiohttp.ClientSession, base_url: str = DEFAULT_BASE_URL
     ) -> None:
-        """Create a client. The session is owned by the caller and never closed here."""
+        """Create a client. The session is owned by the caller and never closed here.
+
+        Raises KilowattlasConfigError (also a ValueError) for a base URL that
+        is not HTTPS (see `checked_base_url`).
+        """
         self._session = session
-        self._base = base_url.rstrip("/")
+        self._base = checked_base_url(base_url)
 
     @property
     def base_url(self) -> str:
@@ -77,8 +167,15 @@ class KilowattlasClient:
     ) -> tuple[int, str]:
         headers = {"Authorization": f"Bearer {token}"} if token else None
         try:
+            # The API never redirects. Following one would hand the request,
+            # and on the same host the token, to wherever it points.
             async with self._session.request(
-                method, f"{self._base}{path}", json=json_body, headers=headers
+                method,
+                f"{self._base}{path}",
+                json=json_body,
+                headers=headers,
+                allow_redirects=False,
+                timeout=REQUEST_TIMEOUT,
             ) as resp:
                 return resp.status, await resp.text()
         except aiohttp.ClientError as err:
@@ -109,6 +206,8 @@ class KilowattlasClient:
         lat: float | None = None,
         lng: float | None = None,
         capability: dict[str, Any] | None = None,
+        *,
+        activation: bool = False,
     ) -> DeviceCode:
         """Start a device-authorization flow.
 
@@ -116,8 +215,16 @@ class KilowattlasClient:
         prefills. `capability` carries optional donor readiness hints
         (sample_capability, sample_interval_seconds, device_brand); the server
         ignores unknown or absent fields.
+
+        With `activation=True` the installation is not created when the user
+        approves, but when the caller reports that its own setup is finished
+        (`activate`). A setup abandoned before that leaves nothing behind. The
+        grant from `poll_token` then says `activation_required`; a server that
+        predates this ignores the request and answers as before.
         """
         payload: dict[str, Any] = {}
+        if activation:
+            payload["activation"] = True
         if lat is not None:
             payload["lat"] = lat
         if lng is not None:
@@ -149,10 +256,23 @@ class KilowattlasClient:
         status, text = await self._request(
             "POST", EP_DEVICE_TOKEN, json_body={"device_code": device_code}
         )
-        data = self._object(text)
+        try:
+            data = self._object(text)
+        except KilowattlasResponseError:
+            if status == 200:
+                raise
+            # An answer that is no JSON at all (a redirect, a proxy's error
+            # page): its status says more than its body.
+            raise KilowattlasResponseError(
+                f"device/token returned {status}"
+            ) from None
         if status == 200:
-            if "token" not in data or "site_id" not in data:
-                raise KilowattlasResponseError("device/token missing token/site_id")
+            if "token" not in data:
+                raise KilowattlasResponseError("device/token missing token")
+            if data.get("activation_required") is True:
+                return TokenGrant(token=str(data["token"]), activation_required=True)
+            if "site_id" not in data:
+                raise KilowattlasResponseError("device/token missing site_id")
             config = data.get("config")
             return TokenGrant(
                 token=str(data["token"]),
@@ -165,6 +285,43 @@ class KilowattlasClient:
         if err in ("expired_token", "invalid_grant"):
             raise AuthorizationExpired
         raise KilowattlasResponseError(f"device/token error: {err or status}")
+
+    async def activate(self, token: str) -> SiteInfo:
+        """Report that setup is finished: the approved installation is created.
+
+        The last step after a grant with `activation_required`. Repeating it
+        answers the same, so it is safe to call again after a lost answer.
+
+        Raises AuthorizationExpired when the approval ran out before this call
+        (nothing was created), KilowattlasAuthError when the token is unknown,
+        and KilowattlasRejectedError when the server can no longer create what
+        was approved (for example the chosen plant got another integration
+        meanwhile).
+        """
+        status, text = await self._request("POST", EP_DEVICE_ACTIVATE, token=token)
+        if status == 401:
+            raise KilowattlasAuthError("token rejected")
+        if status == 410:
+            raise AuthorizationExpired
+        if status in (400, 403, 409):
+            raise KilowattlasRejectedError(
+                str(self._object(text).get("error") or "invalid_request")
+            )
+        if status != 200:
+            raise KilowattlasResponseError(
+                f"device/activate returned {status}: {_snippet(text)}"
+            )
+        data = self._object(text)
+        if "site_id" not in data:
+            raise KilowattlasResponseError(
+                "device/activate returned an unexpected response"
+            )
+        config = data.get("config")
+        return SiteInfo(
+            site_id=int(data["site_id"]),
+            name="",
+            config=config if isinstance(config, dict) else None,
+        )
 
     # --- token-authed -----------------------------------------------------------
 
