@@ -674,7 +674,10 @@ async def test_poll_token_without_site_or_activation(aresponses, client):
 
 async def test_poll_token_without_token(aresponses, client):
     aresponses.add(
-        HOST, EP_DEVICE_TOKEN, "POST", _json({"site_id": 1, "activation_required": True})
+        HOST,
+        EP_DEVICE_TOKEN,
+        "POST",
+        _json({"site_id": 1, "activation_required": True}),
     )
     with pytest.raises(KilowattlasResponseError, match="missing token"):
         await client.poll_token("dc")

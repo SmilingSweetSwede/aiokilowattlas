@@ -99,7 +99,9 @@ def _is_local(host: str) -> bool:
     mapped = getattr(address, "ipv4_mapped", None)
     if mapped is not None:
         address = mapped
-    return any(address in net for net in _LOCAL_NETWORKS if net.version == address.version)
+    return any(
+        address in net for net in _LOCAL_NETWORKS if net.version == address.version
+    )
 
 
 def checked_base_url(base_url: str) -> str:
@@ -263,9 +265,7 @@ class KilowattlasClient:
                 raise
             # An answer that is no JSON at all (a redirect, a proxy's error
             # page): its status says more than its body.
-            raise KilowattlasResponseError(
-                f"device/token returned {status}"
-            ) from None
+            raise KilowattlasResponseError(f"device/token returned {status}") from None
         if status == 200:
             if "token" not in data:
                 raise KilowattlasResponseError("device/token missing token")
